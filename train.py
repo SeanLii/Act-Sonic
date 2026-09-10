@@ -26,6 +26,7 @@ from act.data import (
     split_episodes,
 )
 from act.model import ACTPolicy
+from act.sonic_contract import SONIC_ACTION_HORIZON, contract_dict
 from act.training import compute_loss, seed_everything, seed_worker
 
 
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--grad-accum-steps", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--chunk-size", type=int, default=30)
+    parser.add_argument("--chunk-size", type=int, default=SONIC_ACTION_HORIZON)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--latent-dim", type=int, default=32)
@@ -117,6 +118,7 @@ def save_checkpoint(
         "best_val": best_val,
         "model_config": model_config(args),
         "normalization": stats.as_dict(),
+        "sonic_contract": contract_dict(args.chunk_size),
         "train_episodes": train_episodes,
         "val_episodes": val_episodes,
         "args": vars(args),

@@ -15,6 +15,8 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
+from .sonic_contract import SONIC_ACTION_FIELDS, SONIC_STATE_FIELDS
+
 
 @dataclass(frozen=True)
 class NormalizationStats:
@@ -39,11 +41,48 @@ class NormalizationStats:
                 value = np.maximum(value, 1e-6)
             values[output_name] = value
         stats = cls(**values)
-        if stats.qpos_mean.shape != (46,) or stats.action_mean.shape != (78,):
+        shapes = (
+            stats.qpos_mean.shape,
+            stats.qpos_std.shape,
+            stats.action_mean.shape,
+            stats.action_std.shape,
+        )
+        if shapes != ((46,), (46,), (78,), (78,)):
             raise ValueError(
-                f"dataset dimensions must be qpos=46/action=78, got "
-                f"{stats.qpos_mean.shape}/{stats.action_mean.shape}"
+                "dataset dimensions must be qpos=46/action=78, got "
+                f"qpos mean/std={shapes[0]}/{shapes[1]}, "
+                f"action mean/std={shapes[2]}/{shapes[3]}"
             )
+        if not all(np.isfinite(value).all() for value in values.values()):
+            raise ValueError("normalization statistics contain NaN or Inf")
+        return stats
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "NormalizationStats":
+        """Restore the compact normalization dictionary stored in checkpoints."""
+        values: dict[str, np.ndarray] = {}
+        for name in ("qpos_mean", "qpos_std", "action_mean", "action_std"):
+            if name not in raw:
+                raise ValueError(f"normalization is missing {name!r}")
+            value = np.asarray(raw[name], dtype=np.float32)
+            if name.endswith("_std"):
+                value = np.maximum(value, 1e-6)
+            values[name] = value
+        stats = cls(**values)
+        shapes = (
+            stats.qpos_mean.shape,
+            stats.qpos_std.shape,
+            stats.action_mean.shape,
+            stats.action_std.shape,
+        )
+        if shapes != ((46,), (46,), (78,), (78,)):
+            raise ValueError(
+                "normalization dimensions must be qpos=46/action=78, got "
+                f"qpos mean/std={shapes[0]}/{shapes[1]}, "
+                f"action mean/std={shapes[2]}/{shapes[3]}"
+            )
+        if not all(np.isfinite(value).all() for value in values.values()):
+            raise ValueError("normalization statistics contain NaN or Inf")
         return stats
 
     def as_dict(self) -> dict[str, list[float]]:
@@ -61,6 +100,34 @@ class Episode:
     qpos: np.ndarray
     actions: np.ndarray
     video_path: Path
+
+
+def validate_sonic_layout(dataset_dir: Path) -> None:
+    """Reject metadata whose concatenation order is incompatible with SONIC."""
+    path = dataset_dir / "meta" / "modality.json"
+    if not path.is_file():
+        return  # Older converted datasets did not always retain this file.
+    with path.open("r", encoding="utf-8") as handle:
+        modality = json.load(handle)
+    for modality_name, expected_fields in (
+        ("state", SONIC_STATE_FIELDS),
+        ("action", SONIC_ACTION_FIELDS),
+    ):
+        fields = modality.get(modality_name)
+        if not isinstance(fields, dict):
+            raise ValueError(f"{path}: missing {modality_name!r} layout")
+        expected_start = 0
+        for key, width in expected_fields:
+            spec = fields.get(key)
+            expected_end = expected_start + width
+            if not isinstance(spec, dict) or (
+                spec.get("start"), spec.get("end")
+            ) != (expected_start, expected_end):
+                raise ValueError(
+                    f"{path}: {modality_name}.{key} must occupy "
+                    f"[{expected_start}:{expected_end}] for SONIC, got {spec}"
+                )
+            expected_start = expected_end
 
 
 def read_episode_indices(dataset_dir: Path) -> list[int]:
@@ -99,6 +166,7 @@ class SonicACTDataset(Dataset[dict[str, Tensor]]):
         max_open_videos: int = 8,
     ) -> None:
         self.dataset_dir = Path(dataset_dir).resolve()
+        validate_sonic_layout(self.dataset_dir)
         self.chunk_size = chunk_size
         self.stats = stats
         self.image_size = image_size
